@@ -1,8 +1,10 @@
+
 from __future__ import annotations
 
 import argparse
 import re
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -22,12 +24,17 @@ from pptx.util import Inches, Pt
 BASE_DIR = Path(__file__).resolve().parent
 INPUT_DIR = BASE_DIR / "input"
 OUTPUT_DIR = BASE_DIR / "output"
+BRAND_DIR = BASE_DIR / "assets" / "brand-kit"
 
 COLOR_PRIMARY = RGBColor(0xFF, 0x40, 0xB4)
 COLOR_LIGHT = RGBColor(0xEC, 0xEC, 0xEC)
 COLOR_MUTED = RGBColor(0x72, 0x72, 0x76)
 COLOR_WHITE = RGBColor(0xFF, 0xFF, 0xFF)
 COLOR_DARK = RGBColor(0x1A, 0x1A, 0x1A)
+COLOR_BRAND_DARK = RGBColor(0x5A, 0x76, 0x7E)
+COLOR_BRAND_TEAL = RGBColor(0x54, 0xA7, 0xC5)
+COLOR_BRAND_PALE = RGBColor(0xF7, 0xF7, 0xF8)
+COLOR_CARD_LINE = RGBColor(0xCC, 0xD4, 0xD9)
 
 TIER_COLORS = {
     "Tier 1": COLOR_PRIMARY,
@@ -35,6 +42,12 @@ TIER_COLORS = {
     "Tier 3": COLOR_LIGHT,
     "Tier 4": COLOR_DARK,
 }
+
+ASSET_LOGO = BRAND_DIR / "PRS_variables" / "PRS_logo.png"
+ASSET_SKYLINE = BRAND_DIR / "Mesa de trabajo 2-8.png"
+ASSET_TAGLINE = BRAND_DIR / "Prenseables_bajada" / "Mesa de trabajo 168-8.png"
+ASSET_BRACKET_PINK = BRAND_DIR / "Corchetes" / "Conchetes_rosa" / "Mesa de trabajo 175-8.png"
+ASSET_BRACKET_WHITE = BRAND_DIR / "Corchetes" / "Conchetes_blanco" / "Mesa de trabajo 176-8.png"
 
 
 @dataclass
@@ -107,14 +120,19 @@ class ParsedData:
 
 def extract_text(path: Path) -> str:
     suffix = path.suffix.lower()
-    if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
-    if suffix == ".docx":
-        doc = Document(path)
-        return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
-    if suffix == ".pdf":
-        reader = PdfReader(str(path))
-        return "\n".join(page.extract_text() or "" for page in reader.pages)
+    try:
+        if suffix == ".txt":
+            return path.read_text(encoding="utf-8")
+        if suffix == ".docx":
+            doc = Document(path)
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        if suffix == ".pdf":
+            reader = PdfReader(str(path))
+            return "\n".join(page.extract_text() or "" for page in reader.pages)
+    except UnicodeDecodeError as exc:
+        raise ValueError("El archivo TXT no esta en UTF-8 o no se pudo leer correctamente.") from exc
+    except Exception as exc:
+        raise ValueError(f"No se pudo leer el archivo {path.name}. Revisa que sea un {suffix} valido.") from exc
     raise ValueError(f"Formato no soportado: {suffix}")
 
 
@@ -441,6 +459,7 @@ def find_latest_input() -> Path | None:
 
 
 def write_summary(data: ParsedData, pptx_path: Path, plan_type: str) -> None:
+    pptx_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path = pptx_path.with_suffix(".txt")
     completed = [
         "DATOS GENERALES",
@@ -467,24 +486,112 @@ def write_summary(data: ParsedData, pptx_path: Path, plan_type: str) -> None:
     summary_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def add_slide_base(prs: Presentation, title: str, dark: bool = False):
-    slide = prs.slides.add_slide(prs.slide_layouts[6])
+def get_output_dir() -> Path:
+    candidates = [
+        OUTPUT_DIR,
+        Path(tempfile.gettempdir()) / "strategic-ppt-generator-output",
+    ]
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return candidate
+        except OSError:
+            continue
+    fallback = Path(tempfile.mkdtemp(prefix="strategic-ppt-generator-"))
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+def add_picture_safe(slide, path: Path, left, top, width=None, height=None):
+    if not path.exists():
+        return None
+    kwargs = {}
+    if width is not None:
+        kwargs["width"] = width
+    if height is not None:
+        kwargs["height"] = height
+    return slide.shapes.add_picture(str(path), left, top, **kwargs)
+
+
+def add_brand_logo(slide, dark: bool = False) -> None:
+    if ASSET_LOGO.exists():
+        add_picture_safe(slide, ASSET_LOGO, Inches(10.85), Inches(0.2), width=Inches(1.95))
+    else:
+        badge = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(11.0), Inches(0.2), Inches(1.55), Inches(0.55))
+        badge.fill.solid()
+        badge.fill.fore_color.rgb = COLOR_PRIMARY
+        badge.line.fill.background()
+        add_text_inside_shape(badge, "PRS", COLOR_WHITE, 16, bold=True)
+
+
+def add_footer_tagline(slide, dark: bool = False) -> None:
+    if ASSET_TAGLINE.exists():
+        add_picture_safe(slide, ASSET_TAGLINE, Inches(0.75), Inches(6.82), width=Inches(3.0))
+    else:
+        box = slide.shapes.add_textbox(Inches(0.75), Inches(6.85), Inches(3.5), Inches(0.25))
+        p = box.text_frame.paragraphs[0]
+        p.text = "La agencia de las startups de Latam"
+        p.font.name = "Calibri"
+        p.font.size = Pt(10)
+        p.font.color.rgb = COLOR_WHITE if dark else COLOR_MUTED
+
+
+def add_brand_corner(slide, dark: bool = False) -> None:
+    path = ASSET_BRACKET_WHITE if dark else ASSET_BRACKET_PINK
+    if path.exists():
+        add_picture_safe(slide, path, Inches(0.7), Inches(0.24), width=Inches(0.55))
+
+
+def add_full_bleed_brand_background(slide) -> None:
     fill = slide.background.fill
     fill.solid()
-    fill.fore_color.rgb = COLOR_PRIMARY if dark else COLOR_WHITE
-    if not dark:
-        bar = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, Inches(0.35), prs.slide_height)
-        bar.fill.solid()
-        bar.fill.fore_color.rgb = COLOR_PRIMARY
-        bar.line.fill.background()
-    title_box = slide.shapes.add_textbox(Inches(0.7), Inches(0.35), Inches(12.0), Inches(0.7))
+    fill.fore_color.rgb = COLOR_BRAND_DARK
+    if ASSET_SKYLINE.exists():
+        add_picture_safe(slide, ASSET_SKYLINE, 0, 0, width=Inches(13.333), height=Inches(7.5))
+        overlay = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, Inches(13.333), Inches(7.5))
+        overlay.fill.solid()
+        overlay.fill.fore_color.rgb = COLOR_BRAND_DARK
+        overlay.fill.transparency = 0.16
+        overlay.line.fill.background()
+
+
+def add_slide_base(prs: Presentation, title: str, dark: bool = False):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    if dark:
+        add_full_bleed_brand_background(slide)
+        title_left = Inches(0.95)
+        title_top = Inches(0.52)
+        title_color = COLOR_WHITE
+    else:
+        fill = slide.background.fill
+        fill.solid()
+        fill.fore_color.rgb = COLOR_BRAND_PALE
+        top_band = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, Inches(13.333), Inches(1.05))
+        top_band.fill.solid()
+        top_band.fill.fore_color.rgb = COLOR_BRAND_DARK
+        top_band.line.fill.background()
+        accent = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, 0, 0, Inches(0.26), Inches(7.5))
+        accent.fill.solid()
+        accent.fill.fore_color.rgb = COLOR_PRIMARY
+        accent.line.fill.background()
+        title_left = Inches(0.88)
+        title_top = Inches(0.28)
+        title_color = COLOR_WHITE
+    title_box = slide.shapes.add_textbox(title_left, title_top, Inches(9.5), Inches(0.7))
     p = title_box.text_frame.paragraphs[0]
     run = p.add_run()
     run.text = title
     run.font.name = "Trebuchet MS"
     run.font.bold = True
-    run.font.size = Pt(34 if not dark else 36)
-    run.font.color.rgb = COLOR_WHITE if dark else COLOR_PRIMARY
+    run.font.size = Pt(29 if not dark else 34)
+    run.font.color.rgb = title_color
+    add_brand_corner(slide, dark=dark)
+    add_brand_logo(slide, dark=dark)
+    if not dark:
+        add_footer_tagline(slide, dark=False)
     return slide
 
 
@@ -506,8 +613,8 @@ def add_text_inside_shape(shape, text: str, color: RGBColor, size: int, bold: bo
 def add_text_block(slide, title: str, body: str, left, top, width, height) -> None:
     shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, top, width, height)
     shape.fill.solid()
-    shape.fill.fore_color.rgb = COLOR_LIGHT
-    shape.line.color.rgb = COLOR_MUTED
+    shape.fill.fore_color.rgb = COLOR_WHITE
+    shape.line.color.rgb = COLOR_CARD_LINE
     tf = shape.text_frame
     tf.word_wrap = True
     p = tf.paragraphs[0]
@@ -515,12 +622,16 @@ def add_text_block(slide, title: str, body: str, left, top, width, height) -> No
     p.font.name = "Trebuchet MS"
     p.font.bold = True
     p.font.size = Pt(18)
-    p.font.color.rgb = COLOR_PRIMARY
+    p.font.color.rgb = COLOR_BRAND_DARK
     p2 = tf.add_paragraph()
     p2.text = body
     p2.font.name = "Calibri"
     p2.font.size = Pt(13)
     p2.font.color.rgb = COLOR_DARK
+    accent = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, left, top, Inches(0.14), height)
+    accent.fill.solid()
+    accent.fill.fore_color.rgb = COLOR_PRIMARY
+    accent.line.fill.background()
 
 
 def add_card_heading(slide, text: str, left, top, width) -> None:
@@ -530,7 +641,7 @@ def add_card_heading(slide, text: str, left, top, width) -> None:
     p.font.name = "Trebuchet MS"
     p.font.bold = True
     p.font.size = Pt(18)
-    p.font.color.rgb = COLOR_PRIMARY
+    p.font.color.rgb = COLOR_BRAND_DARK
 
 
 def add_simple_text(slide, text: str, left, top, width, height) -> None:
@@ -551,7 +662,7 @@ def add_big_stat(slide, value: str, left, top, label: str) -> None:
     p.font.name = "Trebuchet MS"
     p.font.bold = True
     p.font.size = Pt(28)
-    p.font.color.rgb = COLOR_DARK
+    p.font.color.rgb = COLOR_BRAND_DARK
     p2 = box.text_frame.add_paragraph()
     p2.text = label
     p2.font.name = "Calibri"
@@ -601,46 +712,66 @@ def add_cover_slide(prs: Presentation, title: str, data: ParsedData) -> None:
     client = data.general.get("nombre del cliente", "[COMPLETAR: nombre del cliente]")
     agency = data.general.get("agencia", "")
 
-    subtitle = slide.shapes.add_textbox(Inches(0.85), Inches(2.35), Inches(11.0), Inches(0.8))
+    block = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(0.85), Inches(1.85), Inches(6.15), Inches(2.45))
+    block.fill.solid()
+    block.fill.fore_color.rgb = COLOR_WHITE
+    block.fill.transparency = 0.08
+    block.line.fill.background()
+
+    subtitle = slide.shapes.add_textbox(Inches(1.1), Inches(2.65), Inches(6.0), Inches(0.8))
     p = subtitle.text_frame.paragraphs[0]
     run = p.add_run()
     run.text = f"{client} | {datetime.now().year}"
     run.font.name = "Trebuchet MS"
-    run.font.size = Pt(22)
+    run.font.bold = True
+    run.font.size = Pt(21)
     run.font.color.rgb = COLOR_WHITE
 
     if agency:
-        footer = slide.shapes.add_textbox(Inches(0.85), Inches(6.15), Inches(10.5), Inches(0.4))
+        footer = slide.shapes.add_textbox(Inches(1.1), Inches(5.9), Inches(10.5), Inches(0.4))
         p = footer.text_frame.paragraphs[0]
         p.text = agency
         p.font.name = "Calibri"
         p.font.size = Pt(14)
         p.font.color.rgb = COLOR_WHITE
 
-    orb = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.OVAL, Inches(10.1), Inches(0.8), Inches(1.9), Inches(1.9))
-    orb.fill.solid()
-    orb.fill.fore_color.rgb = COLOR_LIGHT
-    orb.line.fill.background()
+    kicker = slide.shapes.add_textbox(Inches(1.1), Inches(2.18), Inches(4.5), Inches(0.35))
+    p = kicker.text_frame.paragraphs[0]
+    p.text = "REPORTE ESTRATEGICO"
+    p.font.name = "Calibri"
+    p.font.bold = True
+    p.font.size = Pt(11)
+    p.font.color.rgb = COLOR_WHITE
+    add_footer_tagline(slide, dark=True)
 
 
 def add_section_divider(prs: Presentation, title: str) -> None:
     slide = add_slide_base(prs, title, dark=True)
-    block = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(0.85), Inches(2.2), Inches(4.6), Inches(1.2))
+    block = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, Inches(0.95), Inches(2.2), Inches(5.35), Inches(1.45))
     block.fill.solid()
     block.fill.fore_color.rgb = COLOR_WHITE
+    block.fill.transparency = 0.08
     block.line.fill.background()
-    add_text_inside_shape(block, title, COLOR_PRIMARY, 24, bold=True)
+    add_text_inside_shape(block, title, COLOR_WHITE, 24, bold=True)
+    add_footer_tagline(slide, dark=True)
 
 
 def add_close_slide(prs: Presentation, data: ParsedData) -> None:
     slide = add_slide_base(prs, "Gracias", dark=True)
-    box = slide.shapes.add_textbox(Inches(0.85), Inches(2.5), Inches(11.0), Inches(1.0))
+    box = slide.shapes.add_textbox(Inches(0.95), Inches(2.35), Inches(9.5), Inches(1.3))
     p = box.text_frame.paragraphs[0]
     run = p.add_run()
     run.text = data.general.get("agencia", "Presentacion lista para revision")
     run.font.name = "Calibri"
     run.font.size = Pt(20)
     run.font.color.rgb = COLOR_WHITE
+    p2 = box.text_frame.add_paragraph()
+    p2.text = "Conoce mas de nosotros"
+    p2.font.name = "Trebuchet MS"
+    p2.font.bold = True
+    p2.font.size = Pt(30)
+    p2.font.color.rgb = COLOR_WHITE
+    add_footer_tagline(slide, dark=True)
 
 
 def add_competitor_slides(prs: Presentation, data: ParsedData, title: str = "Analisis de Competidores") -> None:
@@ -653,8 +784,8 @@ def add_competitor_slides(prs: Presentation, data: ParsedData, title: str = "Ana
             top = Inches(1.35)
             card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, top, Inches(3.55), Inches(4.35))
             card.fill.solid()
-            card.fill.fore_color.rgb = COLOR_LIGHT
-            card.line.color.rgb = COLOR_MUTED
+            card.fill.fore_color.rgb = COLOR_WHITE
+            card.line.color.rgb = COLOR_CARD_LINE
             add_card_heading(slide, competitor.name, left + Inches(0.15), top + Inches(0.1), Inches(3.0))
             add_big_stat(slide, competitor.total, left + Inches(0.15), top + Inches(0.55), "Total de notas")
             add_pie_chart(slide, competitor.tiers, left + Inches(0.15), top + Inches(1.55), Inches(3.1), Inches(2.1))
@@ -726,8 +857,8 @@ def add_conclusions_slide(prs: Presentation, data: ParsedData) -> None:
         left = Inches(0.95 + index * 3.95)
         card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, Inches(1.8), Inches(3.45), Inches(3.2))
         card.fill.solid()
-        card.fill.fore_color.rgb = COLOR_LIGHT
-        card.line.color.rgb = COLOR_PRIMARY
+        card.fill.fore_color.rgb = COLOR_WHITE
+        card.line.color.rgb = COLOR_CARD_LINE
         icon = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.HEXAGON, left + Inches(0.18), Inches(2.05), Inches(0.55), Inches(0.55))
         icon.fill.solid()
         icon.fill.fore_color.rgb = COLOR_PRIMARY
@@ -807,15 +938,15 @@ def add_pillars_slide(prs: Presentation, data: ParsedData) -> None:
         left = Inches(0.95 + index * 5.95)
         card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, Inches(1.85), Inches(5.35), Inches(3.45))
         card.fill.solid()
-        card.fill.fore_color.rgb = COLOR_PRIMARY if index == 0 else COLOR_LIGHT
-        card.line.fill.background()
+        card.fill.fore_color.rgb = COLOR_BRAND_DARK if index == 0 else COLOR_WHITE
+        card.line.color.rgb = COLOR_CARD_LINE
         tf = card.text_frame
         p = tf.paragraphs[0]
         p.text = pillar.name
         p.font.name = "Trebuchet MS"
         p.font.bold = True
         p.font.size = Pt(22)
-        p.font.color.rgb = COLOR_WHITE if index == 0 else COLOR_DARK
+        p.font.color.rgb = COLOR_WHITE if index == 0 else COLOR_BRAND_DARK
         p2 = tf.add_paragraph()
         p2.text = pillar.description
         p2.font.name = "Calibri"
@@ -831,15 +962,15 @@ def add_topics_slide(prs: Presentation, data: ParsedData) -> None:
         top = Inches(1.45 + (index // 2) * 1.75)
         card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, top, Inches(5.3), Inches(1.45))
         card.fill.solid()
-        card.fill.fore_color.rgb = COLOR_PRIMARY if index % 2 == 0 else COLOR_LIGHT
-        card.line.fill.background()
+        card.fill.fore_color.rgb = COLOR_PRIMARY if index % 2 == 0 else COLOR_WHITE
+        card.line.color.rgb = COLOR_CARD_LINE
         tf = card.text_frame
         p = tf.paragraphs[0]
         p.text = month
         p.font.name = "Trebuchet MS"
         p.font.bold = True
         p.font.size = Pt(18)
-        p.font.color.rgb = COLOR_WHITE if index % 2 == 0 else COLOR_DARK
+        p.font.color.rgb = COLOR_WHITE if index % 2 == 0 else COLOR_BRAND_DARK
         for item in (items[:2] or ["[COMPLETAR: titular]"]):
             p2 = tf.add_paragraph()
             p2.text = f"- {item}"
@@ -856,7 +987,7 @@ def add_journalists_slide(prs: Presentation, data: ParsedData) -> None:
     for left, width, header in zip(lefts, widths, headers):
         header_shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(left), Inches(1.35), Inches(width), Inches(0.45))
         header_shape.fill.solid()
-        header_shape.fill.fore_color.rgb = COLOR_PRIMARY
+        header_shape.fill.fore_color.rgb = COLOR_BRAND_DARK
         header_shape.line.fill.background()
         add_text_inside_shape(header_shape, header, COLOR_WHITE, 13, bold=True)
     journalists = list(data.journalists[:10])
@@ -868,8 +999,8 @@ def add_journalists_slide(prs: Presentation, data: ParsedData) -> None:
         for left, width, value in zip(lefts, widths, values):
             row = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, Inches(left), top, Inches(width), Inches(0.42))
             row.fill.solid()
-            row.fill.fore_color.rgb = COLOR_LIGHT if index % 2 == 0 else COLOR_WHITE
-            row.line.color.rgb = COLOR_MUTED
+            row.fill.fore_color.rgb = COLOR_WHITE if index % 2 == 0 else COLOR_BRAND_PALE
+            row.line.color.rgb = COLOR_CARD_LINE
             add_text_inside_shape(row, value, COLOR_DARK, 11)
 
 
@@ -939,9 +1070,9 @@ def add_execution_slide(prs: Presentation, data: ParsedData) -> None:
         left = Inches(0.95 + index * 2.8)
         card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, Inches(4.35), Inches(2.3), Inches(1.0))
         card.fill.solid()
-        card.fill.fore_color.rgb = COLOR_PRIMARY if index % 2 == 0 else COLOR_LIGHT
-        card.line.fill.background()
-        add_text_inside_shape(card, stage, COLOR_WHITE if index % 2 == 0 else COLOR_DARK, 15, bold=True)
+        card.fill.fore_color.rgb = COLOR_PRIMARY if index % 2 == 0 else COLOR_WHITE
+        card.line.color.rgb = COLOR_CARD_LINE
+        add_text_inside_shape(card, stage, COLOR_WHITE if index % 2 == 0 else COLOR_BRAND_DARK, 15, bold=True)
 
 
 def add_metrics_slide(prs: Presentation, data: ParsedData) -> None:
@@ -952,8 +1083,8 @@ def add_metrics_slide(prs: Presentation, data: ParsedData) -> None:
         top = Inches(1.45 + (index // 2) * 1.2)
         card = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE, left, top, Inches(5.3), Inches(0.9))
         card.fill.solid()
-        card.fill.fore_color.rgb = COLOR_LIGHT
-        card.line.color.rgb = COLOR_PRIMARY
+        card.fill.fore_color.rgb = COLOR_WHITE
+        card.line.color.rgb = COLOR_CARD_LINE
         add_text_inside_shape(card, metric, COLOR_DARK, 13)
 
 
@@ -993,7 +1124,9 @@ def build_combined_deck(prs: Presentation, data: ParsedData) -> None:
     add_close_slide(prs, data)
 
 
-def save_presentation(data: ParsedData, plan_type: str, source_path: Path) -> Path:
+def save_presentation(data: ParsedData, plan_type: str, source_path: Path, output_dir: Path | None = None) -> Path:
+    output_dir = output_dir or get_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
@@ -1009,28 +1142,29 @@ def save_presentation(data: ParsedData, plan_type: str, source_path: Path) -> Pa
         prefix = "Plan_Estrategico"
 
     client = slugify(data.general.get("nombre del cliente", source_path.stem))
-    output_path = OUTPUT_DIR / f"{prefix}_{client}_{datetime.now().year}.pptx"
+    output_path = output_dir / f"{prefix}_{client}_{datetime.now().year}.pptx"
     prs.save(output_path)
     write_summary(data, output_path, plan_type)
     return output_path
 
 
-def build_presentation(data: ParsedData, plan_type: str, source_path: Path) -> list[Path]:
+def build_presentation(data: ParsedData, plan_type: str, source_path: Path, output_dir: Path | None = None) -> list[Path]:
+    output_dir = output_dir or get_output_dir()
     if plan_type == "separate":
         return [
-            save_presentation(data, "press", source_path),
-            save_presentation(data, "content", source_path),
+            save_presentation(data, "press", source_path, output_dir=output_dir),
+            save_presentation(data, "content", source_path, output_dir=output_dir),
         ]
-    return [save_presentation(data, plan_type, source_path)]
+    return [save_presentation(data, plan_type, source_path, output_dir=output_dir)]
 
 
-def generate_from_file(source: Path, mode: str | None = None, prompt_on_combined: bool = True) -> tuple[list[Path], ParsedData, str]:
+def generate_from_file(source: Path, mode: str | None = None, prompt_on_combined: bool = True, output_dir: Path | None = None) -> tuple[list[Path], ParsedData, str]:
     source = source.expanduser().resolve()
     data = parse_document(extract_text(source))
     plan_type = mode or detect_plan_type(data)
     if plan_type == "combined" and not mode and prompt_on_combined:
         plan_type = prompt_combined_mode()
-    outputs = build_presentation(data, plan_type, source)
+    outputs = build_presentation(data, plan_type, source, output_dir=output_dir)
     return outputs, data, plan_type
 
 
