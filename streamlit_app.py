@@ -235,6 +235,17 @@ def main() -> None:
                             mime="text/plain",
                             use_container_width=True,
                         )
+            except ValueError as exc:
+                st.error(
+                    "No pudimos procesar ese archivo. "
+                    "Sube un TXT, DOCX o PDF valido y, si es posible, usa la plantilla esperada."
+                )
+                st.info(str(exc))
+            except Exception:
+                st.error(
+                    "La app encontro un problema inesperado al procesar el documento. "
+                    "Prueba con otro archivo o avisanos para revisarlo."
+                )
             finally:
                 temp_path.unlink(missing_ok=True)
 
