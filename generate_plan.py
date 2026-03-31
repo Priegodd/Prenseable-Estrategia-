@@ -43,11 +43,22 @@ TIER_COLORS = {
     "Tier 4": COLOR_DARK,
 }
 
-ASSET_LOGO = BRAND_DIR / "PRS_variables" / "PRS_logo.png"
-ASSET_SKYLINE = BRAND_DIR / "Mesa de trabajo 2-8.png"
-ASSET_TAGLINE = BRAND_DIR / "Prenseables_bajada" / "Mesa de trabajo 168-8.png"
-ASSET_BRACKET_PINK = BRAND_DIR / "Corchetes" / "Conchetes_rosa" / "Mesa de trabajo 175-8.png"
-ASSET_BRACKET_WHITE = BRAND_DIR / "Corchetes" / "Conchetes_blanco" / "Mesa de trabajo 176-8.png"
+def resolve_asset(*relative_parts: str) -> Path:
+    candidates = [
+        BRAND_DIR.joinpath(*relative_parts),
+        BASE_DIR.joinpath(*relative_parts),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+ASSET_LOGO = resolve_asset("PRS_variables", "PRS_logo.png")
+ASSET_SKYLINE = resolve_asset("Mesa de trabajo 2-8.png")
+ASSET_TAGLINE = resolve_asset("Prenseables_bajada", "Mesa de trabajo 168-8.png")
+ASSET_BRACKET_PINK = resolve_asset("Corchetes", "Conchetes_rosa", "Mesa de trabajo 175-8.png")
+ASSET_BRACKET_WHITE = resolve_asset("Corchetes", "Conchetes_blanco", "Mesa de trabajo 176-8.png")
 
 
 @dataclass
