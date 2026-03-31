@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import traceback
 from pathlib import Path
 
 import streamlit as st
@@ -241,11 +242,14 @@ def main() -> None:
                     "Sube un TXT, DOCX o PDF valido y, si es posible, usa la plantilla esperada."
                 )
                 st.info(str(exc))
-            except Exception:
+            except Exception as exc:
                 st.error(
                     "La app encontro un problema inesperado al procesar el documento. "
                     "Prueba con otro archivo o avisanos para revisarlo."
                 )
+                with st.expander("Ver detalle tecnico"):
+                    st.code(str(exc) or repr(exc))
+                    st.code(traceback.format_exc())
             finally:
                 temp_path.unlink(missing_ok=True)
 
